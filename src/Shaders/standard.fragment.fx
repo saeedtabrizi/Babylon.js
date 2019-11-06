@@ -64,29 +64,6 @@ void main(void)
 }
 #endif
 
-#if defined(GAUSSIAN_BLUR_H) || defined(GAUSSIAN_BLUR_V)
-uniform float blurOffsets[9];
-uniform float blurWeights[9];
-
-void main(void)
-{
-	vec4 color = vec4(0.0, 0.0, 0.0, 0.0);
-
-	for (int i = 0; i < 9; i++) {
-#ifdef GAUSSIAN_BLUR_H
-		color += (texture2D(textureSampler, vUV + vec2(blurOffsets[i] * 2.0, 0.0)) * blurWeights[i]);
-		color += (texture2D(textureSampler, vUV - vec2(blurOffsets[i] * 2.0, 0.0)) * blurWeights[i]);
-#else
-		color += (texture2D(textureSampler, vUV + vec2(0.0, blurOffsets[i] * 2.0)) * blurWeights[i]);
-		color += (texture2D(textureSampler, vUV - vec2(0.0, blurOffsets[i] * 2.0)) * blurWeights[i]);
-#endif
-	}
-
-	color.a = 1.0;
-	gl_FragColor = color;
-}
-#endif
-
 #if defined(TEXTURE_ADDER)
 uniform sampler2D otherSampler;
 uniform sampler2D lensSampler;
@@ -105,7 +82,176 @@ void main(void)
 	colour = retColor * retColor;
 	colour += colour * texture2D(lensSampler, vUV).rgb;
 
-	gl_FragColor = vec4(colour.rgb, 1.0) + texture2D(otherSampler, vUV);
+	vec4 finalColor = vec4(colour.rgb, 1.0) + texture2D(otherSampler, vUV);
+
+	gl_FragColor = finalColor;
+}
+#endif
+
+#if defined(VLS)
+#define PI 3.1415926535897932384626433832795
+
+uniform mat4 shadowViewProjection;
+uniform mat4 lightWorld;
+
+uniform vec3 cameraPosition;
+uniform vec3 sunDirection;
+uniform vec3 sunColor;
+
+uniform vec2 depthValues;
+
+uniform float scatteringCoefficient;
+uniform float scatteringPower;
+
+uniform sampler2D shadowMapSampler;
+uniform sampler2D positionSampler;
+
+float computeScattering(float lightDotView)
+{
+	float result = 1.0 - scatteringCoefficient * scatteringCoefficient;
+	result /= (4.0 * PI * pow(1.0 + scatteringCoefficient * scatteringCoefficient - (2.0 * scatteringCoefficient) * lightDotView, 1.5));
+	return result;
+}
+
+void main(void)
+{
+	// Compute
+	vec3 worldPos = texture2D(positionSampler, vUV).rgb;
+	vec3 startPosition = cameraPosition;
+
+	vec3 rayVector = worldPos - startPosition;
+
+	float rayLength = length(rayVector);
+	vec3 rayDirection = rayVector / rayLength;
+
+	float stepLength = rayLength / NB_STEPS;
+	vec3 stepL = rayDirection * stepLength;
+	vec3 currentPosition = startPosition;
+	vec3 accumFog = vec3(0.0);
+
+	for (int i = 0; i < int(NB_STEPS); i++)
+	{
+		vec4 worldInShadowCameraSpace = shadowViewProjection * vec4(currentPosition, 1.0);
+		float depthMetric =  (worldInShadowCameraSpace.z + depthValues.x) / (depthValues.y);
+		float shadowPixelDepth = clamp(depthMetric, 0.0, 1.0);
+
+		worldInShadowCameraSpace.xyz /= worldInShadowCameraSpace.w;
+		worldInShadowCameraSpace.xyz = 0.5 * worldInShadowCameraSpace.xyz + vec3(0.5);
+
+		float shadowMapValue = texture2D(shadowMapSampler, worldInShadowCameraSpace.xy).r;
+		
+		if (shadowMapValue > shadowPixelDepth)
+			accumFog += sunColor * computeScattering(dot(rayDirection, sunDirection));
+		
+		currentPosition += stepL;
+	}
+
+	accumFog /= NB_STEPS;
+
+	vec3 color = accumFog * scatteringPower;
+	gl_FragColor = vec4(color * exp(color) , 1.0);
+}
+
+#endif
+
+#if defined(VLSMERGE)
+uniform sampler2D originalSampler;
+
+void main(void)
+{
+	gl_FragColor = texture2D(originalSampler, vUV) + texture2D(textureSampler, vUV);
+}
+#endif
+
+#if defined(LUMINANCE)
+uniform vec2 lumOffsets[4];
+
+void main()
+{
+	float average = 0.0;
+	vec4 color = vec4(0.0);
+	float maximum = -1e20;
+	vec3 weight = vec3(0.299, 0.587, 0.114);
+
+	for (int i = 0; i < 4; i++)
+	{
+		color = texture2D(textureSampler, vUV+ lumOffsets[i]);
+
+		//#ifdef SIMPLE
+		float GreyValue = dot(color.rgb, vec3(0.33, 0.33, 0.33));
+		//#endif
+
+		#ifdef WEIGHTED_AVERAGE
+		float GreyValue = dot(color.rgb, weight);
+		#endif
+
+		#ifdef BRIGHTNESS
+		float GreyValue = max(color.r, max(color.g, color.b));
+		#endif
+
+		#ifdef HSL_COMPONENT
+		float GreyValue = 0.5 * (max(color.r, max(color.g, color.b)) + min(color.r, min(color.g, color.b)));
+		#endif
+
+		#ifdef MAGNITUDE
+		float GreyValue = length(color.rgb);
+		#endif
+
+		maximum = max(maximum, GreyValue);
+		average += (0.25 * log(1e-5 + GreyValue));
+	}
+
+	average = exp(average);
+
+	gl_FragColor = vec4(average, maximum, 0.0, 1.0);
+}
+#endif
+
+#if defined(LUMINANCE_DOWN_SAMPLE)
+uniform vec2 dsOffsets[9];
+uniform float halfDestPixelSize;
+
+#ifdef FINAL_DOWN_SAMPLER
+	#include<packingFunctions>
+#endif
+
+void main()
+{
+	vec4 color = vec4(0.0);
+	float average = 0.0;
+
+	for (int i = 0; i < 9; i++)
+	{
+		color = texture2D(textureSampler, vUV + vec2(halfDestPixelSize, halfDestPixelSize) + dsOffsets[i]);
+		average += color.r;
+	}
+
+	average /= 9.0;
+
+	#ifdef FINAL_DOWN_SAMPLER
+	gl_FragColor = pack(average);
+	#else
+	gl_FragColor = vec4(average, average, 0.0, 1.0);
+	#endif
+}
+#endif
+
+#if defined(HDR)
+uniform sampler2D textureAdderSampler;
+uniform float averageLuminance;
+
+void main()
+{
+	vec4 color = texture2D(textureAdderSampler, vUV);
+
+	#ifndef AUTO_EXPOSURE
+	vec4 adjustedColor = color / averageLuminance;
+
+	color = adjustedColor;
+	color.a = 1.0;
+	#endif
+	
+	gl_FragColor = color;
 }
 #endif
 
@@ -118,12 +264,17 @@ uniform float strength;
 uniform float ghostDispersal;
 uniform float haloWidth;
 
-float hash(vec2 p) {
+uniform vec2 resolution;
+uniform float distortionStrength;
+
+float hash(vec2 p)
+{
 	float h = dot(p, vec2(127.1, 311.7));
 	return -1.0 + 2.0*fract(sin(h)*43758.5453123);
 }
 
-float noise(in vec2 p) {
+float noise(in vec2 p)
+{
 	vec2 i = floor(p);
 	vec2 f = fract(p);
 	vec2 u = f*f*(3.0 - 2.0*f);
@@ -134,7 +285,8 @@ float noise(in vec2 p) {
 			hash(i + vec2(1.0, 1.0)), u.x), u.y);
 }
 
-float fbm(vec2 p) {
+float fbm(vec2 p)
+{
 	float f = 0.0;
 	f += 0.5000 * noise(p); p *= 2.02;
 	f += 0.2500 * noise(p); p *= 2.03;
@@ -160,57 +312,48 @@ float luminance(vec3 color)
 	return dot(color.rgb, vec3(0.2126, 0.7152, 0.0722));
 }
 
+vec4 textureDistorted(sampler2D tex, vec2 texcoord, vec2 direction, vec3 distortion)
+{
+	return vec4(
+		texture2D(tex, texcoord + direction * distortion.r).r,
+		texture2D(tex, texcoord + direction * distortion.g).g,
+		texture2D(tex, texcoord + direction * distortion.b).b,
+		1.0
+	);
+}
+
 void main(void)
 {
 	vec2 uv = -vUV + vec2(1.0);
 	vec2 ghostDir = (vec2(0.5) - uv) * ghostDispersal;
 
-	vec4 result = vec4(0.0);
-	for (int i = 0; i < GHOSTS; ++i)
-	{
-		vec2 offset = fract(uv + ghostDir * float(i));
-		float weight = length(vec2(0.5) - offset) / length(vec2(0.5));
-		weight = pow(1.0 - weight, 10.0);
-		result += texture2D(textureSampler, offset) * weight;
-	}
-
-	float patternWeight = 0.4 * length(vec2(0.5) - uv);
-	result = mix(result, result * vec4(pattern(uv), 1.0), 0.6);
-
-	result *= texture2D(lensColorSampler, vec2(length(vec2(0.5) - vUV) / length(vec2(0.5))));
-
-	vec2 haloVec = normalize(ghostDir) * haloWidth;
-	float weight = length(vec2(0.5) - fract(uv + haloVec)) / length(vec2(0.5));
-	weight = pow(1.0 - weight, 5.0);
-	vec4 halo = texture2D(textureSampler, uv + haloVec) * weight;
-
-	gl_FragColor = (result + halo) * strength;
-}
-#endif
-
-#if defined(LENS_FLARE_SHIFT)
-uniform vec2 resolution;
-uniform float distortionStrength;
-
-void main(void)
-{
-	const float dispersion = 0.15;
-
-	vec2 uv = -vUV + vec2(1.0);
-	vec2 ghostDir = (vec2(0.5) - vUV);
-
 	vec2 texelSize = 1.0 / resolution;
 	vec3 distortion = vec3(-texelSize.x * distortionStrength, 0.0, texelSize.x * distortionStrength);
-	vec2 direction = vec2(normalize(ghostDir));
 
-	vec4 rgbShift = vec4(
-		texture2D(textureSampler, vUV + direction * distortion.r).r,
-		texture2D(textureSampler, vUV + direction * distortion.g).g,
-		texture2D(textureSampler, vUV + direction * distortion.b).b,
-		1.0
-	);
+	vec4 result = vec4(0.0);
+	float ghostIndice = 1.0;
 
-	gl_FragColor = rgbShift;
+	for (int i = 0; i < GHOSTS; ++i)
+	{
+		vec2 offset = fract(uv + ghostDir * ghostIndice);
+		float weight = length(vec2(0.5) - offset) / length(vec2(0.5));
+		weight = pow(1.0 - weight, 10.0);
+
+		result += textureDistorted(textureSampler, offset, normalize(ghostDir), distortion) * weight * strength;
+
+		ghostIndice += 1.0;
+	}
+
+	vec2 haloVec = normalize(ghostDir) * haloWidth;
+
+	float weight = length(vec2(0.5) - fract(uv + haloVec)) / length(vec2(0.5));
+	weight = pow(1.0 - weight, 10.0);
+
+	result += textureDistorted(textureSampler, fract(uv + haloVec), normalize(ghostDir), distortion) * weight * strength;
+
+	result *= texture2D(lensColorSampler, vec2(length(vec2(0.5) - uv) / length(vec2(0.5))));
+
+	gl_FragColor = result;
 }
 #endif
 
@@ -219,27 +362,14 @@ uniform sampler2D otherSampler;
 uniform sampler2D lensDirtSampler;
 uniform sampler2D lensStarSampler;
 
-uniform mat4 viewMatrix;
-uniform mat3 scaleBias1;
-uniform mat3 scaleBias2;
+uniform mat4 lensStarMatrix;
 
 void main(void)
 {
-	vec3 camerax = viewMatrix[0].xyz;
-	vec3 cameraz = viewMatrix[1].xyz;
-	float camRot = dot(camerax, vec3(0.0, 0.0, 1.0)) + dot(cameraz, vec3(0.0, 1.0, 0.0));
-
-	mat3 rotation = mat3(
-		cos(camRot), -sin(camRot), 0.0,
-		sin(camRot), cos(camRot), 0.0,
-		0.0, 0.0, 1.0
-	);
-
-	mat3 lensMatrix = scaleBias2 * rotation * scaleBias1;
-	vec2 lensFlareCoords = (lensMatrix * vec3(vUV, 1.0)).xy;
+	vec2 lensFlareCoords = (lensStarMatrix * vec4(vUV, 1.0, 1.0)).xy;
 
 	vec4 lensMod = texture2D(lensDirtSampler, vUV);
-	lensMod += texture2D(lensStarSampler, lensFlareCoords);
+	lensMod += texture2D(lensStarSampler, vUV/*lensFlareCoords*/);
 
 	vec4 result = texture2D(textureSampler, vUV) * lensMod;
 
@@ -272,5 +402,45 @@ void main(void)
 	factor = clamp(factor, 0.0, 0.90);
 	gl_FragColor = mix(sharp, blur, factor);
 }
+#endif
 
+#if defined(MOTION_BLUR)
+uniform mat4 inverseViewProjection;
+uniform mat4 prevViewProjection;
+
+uniform vec2 screenSize;
+
+uniform float motionScale;
+uniform float motionStrength;
+
+uniform sampler2D depthSampler;
+
+void main(void)
+{
+	vec2 texelSize = 1.0 / screenSize;
+	float depth = texture2D(depthSampler, vUV).r;
+
+	vec4 cpos = vec4(vUV * 2.0 - 1.0, depth, 1.0);
+	cpos = cpos * inverseViewProjection;
+
+	vec4 ppos = cpos * prevViewProjection;
+	ppos.xyz /= ppos.w;
+	ppos.xy = ppos.xy * 0.5 + 0.5;
+
+	vec2 velocity = (ppos.xy - vUV) * motionScale * motionStrength;
+	float speed = length(velocity / texelSize);
+	int nSamples = int(clamp(speed, 1.0, MAX_MOTION_SAMPLES));
+
+	vec4 result = texture2D(textureSampler, vUV);
+
+	for (int i = 1; i < int(MAX_MOTION_SAMPLES); ++i) {
+		if (i >= nSamples)
+			break;
+		
+		vec2 offset1 = vUV + velocity * (float(i) / float(nSamples - 1) - 0.5);
+		result += texture2D(textureSampler, offset1);
+	}
+
+	gl_FragColor = result / float(nSamples);
+}
 #endif

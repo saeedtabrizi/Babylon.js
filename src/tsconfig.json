@@ -1,7 +1,8 @@
 {
+    "extends": "../tsconfigRules",
     "compilerOptions": {
-        "experimentalDecorators": true,
-        "module": "commonjs", 
-        "target": "es5"
+        "types": [],
+        "baseUrl": "./",
+        "rootDir": "./"
     }
 }
